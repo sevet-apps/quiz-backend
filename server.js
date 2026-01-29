@@ -22,6 +22,7 @@ let gameState = {
 };
 
 // --- API ---
+
 app.get('/api/questions/:classLevel', async (req, res) => {
     const { classLevel } = req.params;
     const { data, error } = await supabase
@@ -34,7 +35,8 @@ app.get('/api/questions/:classLevel', async (req, res) => {
 });
 
 app.post('/api/submit', async (req, res) => {
-    const { teamName, classLevel, answers } = req.body;
+    // Теперь принимаем userId (уникальный код)
+    const { teamName, classLevel, answers, userId } = req.body;
     
     const { data: correctData } = await supabase
         .from('quiz_questions')
@@ -51,10 +53,11 @@ app.post('/api/submit', async (req, res) => {
         });
     }
 
+    // ИЩЕМ ПО УНИКАЛЬНОМУ ID (user_uuid), А НЕ ПО ИМЕНИ
     const { data: existingUser } = await supabase
         .from('quiz_results')
         .select('*')
-        .eq('team_name', teamName)
+        .eq('user_uuid', userId) 
         .eq('class_level', classLevel)
         .single();
 
@@ -62,11 +65,21 @@ app.post('/api/submit', async (req, res) => {
     if (existingUser) {
         newScore = existingUser.score + pointsToAdd;
         const newPercent = Math.round((newScore / 10) * 100);
-        await supabase.from('quiz_results').update({ score: newScore, percentage: newPercent }).eq('id', existingUser.id);
+        // Обновляем имя тоже, вдруг исправил опечатку
+        await supabase
+            .from('quiz_results')
+            .update({ score: newScore, percentage: newPercent, team_name: teamName }) 
+            .eq('id', existingUser.id);
     } else {
         newScore = pointsToAdd;
         const newPercent = Math.round((newScore / 10) * 100);
-        await supabase.from('quiz_results').insert({ team_name: teamName, class_level: classLevel, score: newScore, percentage: newPercent });
+        await supabase.from('quiz_results').insert({ 
+            team_name: teamName, 
+            class_level: classLevel, 
+            score: newScore, 
+            percentage: newPercent,
+            user_uuid: userId // Сохраняем ID
+        });
     }
     res.json({ success: true });
 });
@@ -82,46 +95,30 @@ app.get('/api/leaderboard/:classLevel', async (req, res) => {
     res.json(data);
 });
 
-// --- ПОДСЧЕТ ЛЮДЕЙ (БЕЗ УЧИТЕЛЯ) ---
 async function updateOnlineCount(classLevel) {
-    // Получаем всех сокетов в комнате
     const sockets = await io.in(`class_${classLevel}`).fetchSockets();
-    
-    // Считаем только тех, кто НЕ учитель
     let studentCount = 0;
     for (const s of sockets) {
-        if (!s.data.isTeacher) {
-            studentCount++;
-        }
+        if (!s.data.isTeacher) studentCount++;
     }
-    
-    // Отправляем всем новое число
     io.to(`class_${classLevel}`).emit('online_count', studentCount);
 }
 
 // --- SOCKET.IO ---
 io.on('connection', (socket) => {
     
-    // Вход в класс (теперь принимаем объект с флагом isTeacher)
     socket.on('join_class', ({ classLevel, isTeacher }) => {
         socket.join(`class_${classLevel}`);
-        
-        // Сохраняем данные прямо в сокет
         socket.currentClass = classLevel;
         socket.data.isTeacher = isTeacher; 
 
-        // Отправляем состояние игры
         const state = gameState[classLevel];
         if(state) socket.emit('sync_state', state); 
-        
-        // Обновляем счетчик
         updateOnlineCount(classLevel);
     });
 
     socket.on('disconnect', () => {
-        if (socket.currentClass) {
-            updateOnlineCount(socket.currentClass);
-        }
+        if (socket.currentClass) updateOnlineCount(socket.currentClass);
     });
 
     socket.on('teacher_next', (classLevel) => {
