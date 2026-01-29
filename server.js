@@ -15,16 +15,13 @@ const io = new Server(server, { cors: { origin: "*" } });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // --- СОСТОЯНИЕ ИГРЫ ---
-// -1 = Игра не началась (Лобби)
-// 0, 1, 2... = Индекс текущего вопроса
-// 'finished' = Таблица лидеров
 let gameState = {
     7: { currentIndex: -1 },
     8: { currentIndex: -1 },
     9: { currentIndex: -1 }
 };
 
-// --- API ---
+// --- API (БЕЗ ИЗМЕНЕНИЙ) ---
 
 app.get('/api/questions/:classLevel', async (req, res) => {
     const { classLevel } = req.params;
@@ -38,7 +35,6 @@ app.get('/api/questions/:classLevel', async (req, res) => {
 });
 
 app.post('/api/submit', async (req, res) => {
-    // teamName теперь по сути Имя Ученика
     const { teamName, classLevel, answers } = req.body;
     
     const { data: correctData } = await supabase
@@ -56,7 +52,6 @@ app.post('/api/submit', async (req, res) => {
         });
     }
 
-    // Ищем ученика по имени
     const { data: existingUser } = await supabase
         .from('quiz_results')
         .select('*')
@@ -67,7 +62,7 @@ app.post('/api/submit', async (req, res) => {
     let newScore = 0;
     if (existingUser) {
         newScore = existingUser.score + pointsToAdd;
-        const newPercent = Math.round((newScore / 10) * 100); // Предполагаем 10 вопросов
+        const newPercent = Math.round((newScore / 10) * 100);
         await supabase.from('quiz_results').update({ score: newScore, percentage: newPercent }).eq('id', existingUser.id);
     } else {
         newScore = pointsToAdd;
@@ -88,41 +83,55 @@ app.get('/api/leaderboard/:classLevel', async (req, res) => {
     res.json(data);
 });
 
+// --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ПОДСЧЕТА ---
+function updateOnlineCount(classLevel) {
+    // Берем комнату socket.io
+    const room = io.sockets.adapter.rooms.get(`class_${classLevel}`);
+    const count = room ? room.size : 0;
+    // Отправляем всем в этой комнате новое число
+    io.to(`class_${classLevel}`).emit('online_count', count);
+}
+
 // --- SOCKET.IO ---
 io.on('connection', (socket) => {
+    
     socket.on('join_class', (classLevel) => {
         socket.join(`class_${classLevel}`);
+        socket.currentClass = classLevel; // Запоминаем класс для этого сокета
+
+        // Отправляем состояние игры
         const state = gameState[classLevel];
         if(state) socket.emit('sync_state', state); 
+        
+        // ОБНОВЛЯЕМ СЧЕТЧИК ЛЮДЕЙ
+        updateOnlineCount(classLevel);
     });
 
-    // КОМАНДА УЧИТЕЛЯ: "СЛЕДУЮЩИЙ ВОПРОС" (или начать)
+    // Когда кто-то отключается (вышел из приложения)
+    socket.on('disconnect', () => {
+        if (socket.currentClass) {
+            updateOnlineCount(socket.currentClass);
+        }
+    });
+
+    // УЧИТЕЛЬСКИЕ ФУНКЦИИ
     socket.on('teacher_next', (classLevel) => {
         if (!gameState[classLevel]) return;
-        
-        if (gameState[classLevel].currentIndex === 'finished') {
-            // Если игра была закончена, ничего не делаем или сбрасываем (тут по логике лучше сброс)
-            return; 
-        }
+        if (gameState[classLevel].currentIndex === 'finished') return; 
 
-        // Переключаем индекс
         gameState[classLevel].currentIndex++;
-        
-        // Отправляем всем новое состояние
         io.to(`class_${classLevel}`).emit('sync_state', gameState[classLevel]);
     });
 
-    // КОМАНДА УЧИТЕЛЯ: "ЗАВЕРШИТЬ / ПОКАЗАТЬ РЕЗУЛЬТАТЫ"
     socket.on('teacher_finish', (classLevel) => {
         if (!gameState[classLevel]) return;
         gameState[classLevel].currentIndex = 'finished';
         io.to(`class_${classLevel}`).emit('sync_state', gameState[classLevel]);
     });
 
-    // КОМАНДА УЧИТЕЛЯ: "СБРОС"
     socket.on('teacher_reset', (classLevel) => {
         if (!gameState[classLevel]) return;
-        gameState[classLevel].currentIndex = -1; // Возвращаем в лобби
+        gameState[classLevel].currentIndex = -1;
         io.to(`class_${classLevel}`).emit('sync_state', gameState[classLevel]);
     });
 });
