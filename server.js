@@ -21,8 +21,7 @@ let gameState = {
     9: { currentIndex: -1 }
 };
 
-// --- API (БЕЗ ИЗМЕНЕНИЙ) ---
-
+// --- API ---
 app.get('/api/questions/:classLevel', async (req, res) => {
     const { classLevel } = req.params;
     const { data, error } = await supabase
@@ -83,38 +82,48 @@ app.get('/api/leaderboard/:classLevel', async (req, res) => {
     res.json(data);
 });
 
-// --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ПОДСЧЕТА ---
-function updateOnlineCount(classLevel) {
-    // Берем комнату socket.io
-    const room = io.sockets.adapter.rooms.get(`class_${classLevel}`);
-    const count = room ? room.size : 0;
-    // Отправляем всем в этой комнате новое число
-    io.to(`class_${classLevel}`).emit('online_count', count);
+// --- ПОДСЧЕТ ЛЮДЕЙ (БЕЗ УЧИТЕЛЯ) ---
+async function updateOnlineCount(classLevel) {
+    // Получаем всех сокетов в комнате
+    const sockets = await io.in(`class_${classLevel}`).fetchSockets();
+    
+    // Считаем только тех, кто НЕ учитель
+    let studentCount = 0;
+    for (const s of sockets) {
+        if (!s.data.isTeacher) {
+            studentCount++;
+        }
+    }
+    
+    // Отправляем всем новое число
+    io.to(`class_${classLevel}`).emit('online_count', studentCount);
 }
 
 // --- SOCKET.IO ---
 io.on('connection', (socket) => {
     
-    socket.on('join_class', (classLevel) => {
+    // Вход в класс (теперь принимаем объект с флагом isTeacher)
+    socket.on('join_class', ({ classLevel, isTeacher }) => {
         socket.join(`class_${classLevel}`);
-        socket.currentClass = classLevel; // Запоминаем класс для этого сокета
+        
+        // Сохраняем данные прямо в сокет
+        socket.currentClass = classLevel;
+        socket.data.isTeacher = isTeacher; 
 
         // Отправляем состояние игры
         const state = gameState[classLevel];
         if(state) socket.emit('sync_state', state); 
         
-        // ОБНОВЛЯЕМ СЧЕТЧИК ЛЮДЕЙ
+        // Обновляем счетчик
         updateOnlineCount(classLevel);
     });
 
-    // Когда кто-то отключается (вышел из приложения)
     socket.on('disconnect', () => {
         if (socket.currentClass) {
             updateOnlineCount(socket.currentClass);
         }
     });
 
-    // УЧИТЕЛЬСКИЕ ФУНКЦИИ
     socket.on('teacher_next', (classLevel) => {
         if (!gameState[classLevel]) return;
         if (gameState[classLevel].currentIndex === 'finished') return; 
